@@ -23,6 +23,14 @@ def convert2cpu(matrix):
         return matrix
 
 def predict_transform(prediction, inp_dim, anchors, num_classes, CUDA = True):
+    """
+    :param prediction:
+    :param inp_dim:
+    :param anchors: list[(116,90),(156,198),(373,326)]
+    :param num_classes:
+    :param CUDA:
+    :return:
+    """
     batch_size = prediction.size(0)
     stride =  inp_dim // prediction.size(2)
     grid_size = inp_dim // stride
@@ -32,11 +40,14 @@ def predict_transform(prediction, inp_dim, anchors, num_classes, CUDA = True):
     anchors = [(a[0]/stride, a[1]/stride) for a in anchors]
 
 
-
+    # prediction(batch_size * 13*13 *255)
     prediction = prediction.view(batch_size, bbox_attrs*num_anchors, grid_size*grid_size)
+    # prediction(batch_size * 85*3 * 13*13)
     prediction = prediction.transpose(1,2).contiguous()
+    # prediction(batch_size * 13*13 * 85*3)
     prediction = prediction.view(batch_size, grid_size*grid_size*num_anchors, bbox_attrs)
-
+    # prediction(batch_size * 13*13*3 * 85)
+    # 转换后255个参数被分成了3行且255个参数的排列顺序是连着三个中心坐标再连着三个w等等
 
     #Sigmoid the  centre_X, centre_Y. and object confidencce
     prediction[:,:,0] = torch.sigmoid(prediction[:,:,0])
@@ -55,17 +66,20 @@ def predict_transform(prediction, inp_dim, anchors, num_classes, CUDA = True):
     if CUDA:
         x_offset = x_offset.cuda()
         y_offset = y_offset.cuda()
-    
+
+    # repeat(1,3)第一个参数是行重复的次数，第二个参数是列重复的次数
     x_y_offset = torch.cat((x_offset, y_offset), 1).repeat(1,num_anchors).view(-1,2).unsqueeze(0)
-    
+
+    # [2,2,2]+[1,2,2]第一个维度每个都加
     prediction[:,:,:2] += x_y_offset
       
     #log space transform height and the width
+    # anchors.shape [3,2]
     anchors = torch.FloatTensor(anchors)
     
     if CUDA:
         anchors = anchors.cuda()
-    
+    # anchors.shape [1,13*13*3,2]
     anchors = anchors.repeat(grid_size*grid_size, 1).unsqueeze(0)
     prediction[:,:,2:4] = torch.exp(prediction[:,:,2:4])*anchors
 
@@ -88,7 +102,9 @@ def get_im_dim(im):
     return w,h
 
 def unique(tensor):
+    # 转换到cpu上的numpy数组
     tensor_np = tensor.cpu().numpy()
+    # np.unique去掉数组中的重复数字并进行排序输出
     unique_np = np.unique(tensor_np)
     unique_tensor = torch.from_numpy(unique_np)
     
@@ -97,6 +113,7 @@ def unique(tensor):
     return tensor_res
 
 def write_results(prediction, confidence, num_classes, nms = True, nms_conf = 0.4):
+    # 将小于对象置信度的行置0
     conf_mask = (prediction[:,:,4] > confidence).float().unsqueeze(2)
     prediction = prediction*conf_mask
     
@@ -106,7 +123,7 @@ def write_results(prediction, confidence, num_classes, nms = True, nms_conf = 0.
     except:
         return 0
     
-    
+    # 将中心坐标宽度高度转换为左上角以及右下角坐标
     box_a = prediction.new(prediction.shape)
     box_a[:,:,0] = (prediction[:,:,0] - prediction[:,:,2]/2)
     box_a[:,:,1] = (prediction[:,:,1] - prediction[:,:,3]/2)
@@ -131,15 +148,18 @@ def write_results(prediction, confidence, num_classes, nms = True, nms_conf = 0.
         #Get the class having maximum score, and the index of that class
         #Get rid of num_classes softmax scores 
         #Add the class index and the class score of class having maximum score
+        # torch.max返回最大值和最大值索引
         max_conf, max_conf_score = torch.max(image_pred[:,5:5+ num_classes], 1)
         max_conf = max_conf.float().unsqueeze(1)
         max_conf_score = max_conf_score.float().unsqueeze(1)
         seq = (image_pred[:,:5], max_conf, max_conf_score)
+        # shape [?,7]
         image_pred = torch.cat(seq, 1)
         
 
         
         #Get rid of the zero entries
+        # torch.nonzero返回输入的非零元素的索引
         non_zero_ind =  (torch.nonzero(image_pred[:,4]))
 
         
@@ -150,10 +170,13 @@ def write_results(prediction, confidence, num_classes, nms = True, nms_conf = 0.
             img_classes = unique(image_pred_[:,-1])
         except:
              continue
-        #WE will do NMS classwise
+        #WE will do NMS classwise 按类执行非极大值抑制
         for cls in img_classes:
             #get the detections with one particular class
+            # 取出image_pred_中的当前类别的行，按类别执行非极大值抑制
+            # image_pred_[:,-1] == cls 是[?]维tensor unsqueeze后变为[?,1]维tensor
             cls_mask = image_pred_*(image_pred_[:,-1] == cls).float().unsqueeze(1)
+            # class_mask_ind是[?,1]维的tensor
             class_mask_ind = torch.nonzero(cls_mask[:,-2]).squeeze()
             
 
@@ -163,6 +186,8 @@ def write_results(prediction, confidence, num_classes, nms = True, nms_conf = 0.
         
              #sort the detections such that the entry with the maximum objectness
              #confidence is at the top
+            # conf_sort_index是[?,1]维tensor
+            # 按照是否是目标的概率排序
             conf_sort_index = torch.sort(image_pred_class[:,4], descending = True )[1]
             image_pred_class = image_pred_class[conf_sort_index]
             idx = image_pred_class.size(0)
@@ -174,6 +199,7 @@ def write_results(prediction, confidence, num_classes, nms = True, nms_conf = 0.
                     #Get the IOUs of all boxes that come after the one we are looking at 
                     #in the loop
                     try:
+                        # 选择i单独一行会自动去掉一个维度，要加上此维度
                         ious = bbox_iou(image_pred_class[i].unsqueeze(0), image_pred_class[i+1:])
                     except ValueError:
                         break
@@ -183,9 +209,10 @@ def write_results(prediction, confidence, num_classes, nms = True, nms_conf = 0.
                     
                     #Zero out all the detections that have IoU > treshhold
                     iou_mask = (ious < nms_conf).float().unsqueeze(1)
-                    image_pred_class[i+1:] *= iou_mask       
+                    image_pred_class[i+1:] *= iou_mask
                     
                     #Remove the non-zero entries
+                    # 乘以0以后所有的这一行的元素都变为0
                     non_zero_ind = torch.nonzero(image_pred_class[:,4]).squeeze()
                     image_pred_class = image_pred_class[non_zero_ind].view(-1,7)
                     
